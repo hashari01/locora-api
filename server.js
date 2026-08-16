@@ -1,4 +1,3 @@
-```javascript
 require("dotenv").config();
 
 const express = require("express");
@@ -22,137 +21,26 @@ app.use(
     })
 );
 
-app.use(
-    express.json({
-        limit: "100kb"
-    })
-);
-
+app.use(express.json());
 
 /* =========================================================
    HEALTH CHECK
 ========================================================= */
 
 app.get("/", (req, res) => {
-
     res.json({
         success: true,
         service: "Locora API",
         status: "online",
         version: "2.0.0"
     });
-
 });
 
 
 /* =========================================================
-   CATEGORY DEFINITIONS
-========================================================= */
-
-const CATEGORY_MAP = {
-
-    restaurants: {
-        name: "Restaurants",
-        filters: [
-            ["amenity", "restaurant"]
-        ]
-    },
-
-    coffee: {
-        name: "Coffee",
-        filters: [
-            ["amenity", "cafe"],
-            ["amenity", "coffee_shop"]
-        ]
-    },
-
-    hotels: {
-        name: "Hotels",
-        filters: [
-            ["tourism", "hotel"],
-            ["tourism", "hostel"],
-            ["tourism", "guest_house"]
-        ]
-    },
-
-    shopping: {
-        name: "Shopping",
-        filters: [
-            ["shop", "supermarket"],
-            ["shop", "mall"],
-            ["shop", "department_store"],
-            ["shop", "clothes"],
-            ["shop", "convenience"],
-            ["shop", "gift"],
-            ["shop", "electronics"]
-        ]
-    },
-
-    things: {
-        name: "Things to do",
-        filters: [
-            ["tourism", "attraction"],
-            ["tourism", "museum"],
-            ["leisure", "park"],
-            ["leisure", "sports_centre"],
-            ["amenity", "cinema"],
-            ["amenity", "theatre"]
-        ]
-    },
-
-    services: {
-        name: "Services",
-        filters: [
-            ["amenity", "bank"],
-            ["amenity", "pharmacy"],
-            ["amenity", "post_office"],
-            ["amenity", "car_rental"],
-            ["shop", "hairdresser"],
-            ["shop", "beauty"]
-        ]
-    }
-
-};
-
-
-/* =========================================================
-   NOMINATIM SEARCH
-========================================================= */
-
-async function searchLocation(query) {
-
-    const url =
-        "https://nominatim.openstreetmap.org/search" +
-        "?format=jsonv2" +
-        "&addressdetails=1" +
-        "&limit=5" +
-        "&q=" +
-        encodeURIComponent(query);
-
-    const response = await fetch(url, {
-
-        headers: {
-            "User-Agent":
-                "Locora/2.0 (location discovery application)"
-        }
-
-    });
-
-    if (!response.ok) {
-
-        throw new Error(
-            `Location search failed: ${response.status}`
-        );
-
-    }
-
-    return await response.json();
-
-}
-
-
-/* =========================================================
-   LOCATION SEARCH ENDPOINT
+   LOCATION SEARCH
+   Example:
+   /search?q=Indianapolis
 ========================================================= */
 
 app.get("/search", async (req, res) => {
@@ -165,64 +53,63 @@ app.get("/search", async (req, res) => {
                 : "";
 
         if (!query) {
-
             return res.status(400).json({
                 success: false,
-                error: "Please provide a location."
+                error: "Search query is required."
             });
-
         }
 
-        if (query.length > 200) {
-
-            return res.status(400).json({
-                success: false,
-                error: "Search query is too long."
+        const url =
+            "https://nominatim.openstreetmap.org/search?" +
+            new URLSearchParams({
+                q: query,
+                format: "json",
+                addressdetails: "1",
+                limit: "5"
             });
 
+        const response = await fetch(url, {
+            headers: {
+                "User-Agent":
+                    "Locora/2.0 (location discovery website)"
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(
+                `Nominatim returned ${response.status}`
+            );
         }
+
+        const data =
+            await response.json();
 
         const results =
-            await searchLocation(query);
-
-        const locations =
-            results.map(result => ({
-
+            data.map(place => ({
                 name:
-                    result.name ||
-                    query,
+                    place.name ||
+                    place.display_name.split(",")[0],
 
                 displayName:
-                    result.display_name,
+                    place.display_name,
 
                 latitude:
-                    Number(result.lat),
+                    Number(place.lat),
 
                 longitude:
-                    Number(result.lon),
+                    Number(place.lon),
 
                 type:
-                    result.type ||
-                    "unknown",
+                    place.type || "unknown",
 
                 category:
-                    result.class ||
-                    "unknown"
-
-            }))
-            .filter(location =>
-                Number.isFinite(location.latitude) &&
-                Number.isFinite(location.longitude)
-            );
+                    place.category || "unknown"
+            }));
 
         return res.json({
-
             success: true,
-
             query,
-
-            results: locations
-
+            results
         });
 
     } catch (error) {
@@ -233,164 +120,498 @@ app.get("/search", async (req, res) => {
         );
 
         return res.status(500).json({
-
             success: false,
-
             error:
-                "Unable to search for that location."
-
+                "Unable to search for this location."
         });
-
     }
-
 });
 
 
 /* =========================================================
-   OVERPASS API
+   NEARBY PLACE SEARCH
+   Example:
+   /places?lat=39.7683&lon=-86.1583&category=restaurant
 ========================================================= */
 
-const OVERPASS_SERVERS = [
+const CATEGORY_FILTERS = {
 
-    "https://overpass-api.de/api/interpreter",
+    restaurant: `
+        nwr["amenity"="restaurant"];
+    `,
 
-    "https://overpass.kumi.systems/api/interpreter",
+    coffee: `
+        nwr["amenity"="cafe"];
+    `,
 
-    "https://overpass.private.coffee/api/interpreter"
+    hotel: `
+        nwr["tourism"="hotel"];
+    `,
 
-];
+    shopping: `
+        nwr["shop"];
+    `,
+
+    things: `
+        nwr["tourism"~"attraction|museum|gallery|theme_park|zoo"];
+        nwr["leisure"~"park|sports_centre|stadium"];
+    `,
+
+    service: `
+        nwr["shop"];
+        nwr["amenity"];
+    `
+};
 
 
 /* =========================================================
-   BUILD OVERPASS QUERY
+   PLACES ENDPOINT
 ========================================================= */
 
-function buildOverpassQuery(
-    latitude,
-    longitude,
-    category
-) {
+app.get("/places", async (req, res) => {
 
-    const categoryInfo =
-        CATEGORY_MAP[category];
+    try {
 
-    if (!categoryInfo) {
+        const lat =
+            Number(req.query.lat);
 
-        throw new Error(
-            "Invalid category."
-        );
+        const lon =
+            Number(req.query.lon);
 
-    }
+        const category =
+            typeof req.query.category === "string"
+                ? req.query.category.toLowerCase()
+                : "";
 
-    const radius = 10000;
-
-    const filters =
-        categoryInfo.filters
-            .map(
-                ([key, value]) =>
-                    `
-                    nwr[
-                        "${key}"="${value}"
-                    ](
-                        around:${radius},
-                        ${latitude},
-                        ${longitude}
-                    );
-                    `
-            )
-            .join("\n");
-
-    return `
-        [out:json][timeout:25];
-
-        (
-            ${filters}
-        );
-
-        out center tags;
-    `;
-}
-
-
-/* =========================================================
-   SEARCH NEARBY PLACES
-========================================================= */
-
-async function searchNearbyPlaces(
-    latitude,
-    longitude,
-    category
-) {
-
-    const query =
-        buildOverpassQuery(
-            latitude,
-            longitude,
-            category
-        );
-
-    let lastError = null;
-
-    for (
-        const server of OVERPASS_SERVERS
-    ) {
-
-        try {
-
-            const response =
-                await fetch(
-                    server,
-                    {
-
-                        method: "POST",
-
-                        headers: {
-                            "Content-Type":
-                                "application/x-www-form-urlencoded",
-                            "User-Agent":
-                                "Locora/2.0"
-                        },
-
-                        body:
-                            "data=" +
-                            encodeURIComponent(
-                                query
-                            )
-
-                    }
-                );
-
-            if (!response.ok) {
-
-                throw new Error(
-                    `Overpass returned ${response.status}`
-                );
-
-            }
-
-            const data =
-                await response.json();
-
-            return data.elements || [];
-
-        } catch (error) {
-
-            console.error(
-                `Overpass server failed: ${server}`,
-                error.message
-            );
-
-            lastError = error;
-
+        if (
+            !Number.isFinite(lat) ||
+            !Number.isFinite(lon)
+        ) {
+            return res.status(400).json({
+                success: false,
+                error:
+                    "Valid latitude and longitude are required."
+            });
         }
 
-    }
+        if (
+            lat < -90 ||
+            lat > 90 ||
+            lon < -180 ||
+            lon > 180
+        ) {
+            return res.status(400).json({
+                success: false,
+                error:
+                    "Invalid coordinates."
+            });
+        }
 
-    throw lastError ||
-        new Error(
-            "All location servers failed."
+        if (!CATEGORY_FILTERS[category]) {
+            return res.status(400).json({
+                success: false,
+                error:
+                    "Invalid category.",
+                availableCategories:
+                    Object.keys(CATEGORY_FILTERS)
+            });
+        }
+
+
+        /*
+         * Search radius:
+         * 5 kilometers around the searched location.
+         */
+
+        const radius = 5000;
+
+        const filters =
+            CATEGORY_FILTERS[category];
+
+
+        /*
+         * Overpass query.
+         *
+         * This searches OpenStreetMap for
+         * REAL places around the coordinates.
+         */
+
+        const query = `
+[out:json][timeout:25];
+
+(
+    ${filters}
+);
+
+out center tags;
+`;
+
+
+        /*
+         * Add coordinates to every filter
+         * automatically.
+         *
+         * Replace the category blocks with
+         * radius-based queries.
+         */
+
+        let radiusQuery = "";
+
+
+        if (category === "restaurant") {
+
+            radiusQuery = `
+[out:json][timeout:25];
+
+nwr(
+    around:${radius},${lat},${lon}
+)["amenity"="restaurant"];
+
+out center tags;
+`;
+
+        } else if (category === "coffee") {
+
+            radiusQuery = `
+[out:json][timeout:25];
+
+nwr(
+    around:${radius},${lat},${lon}
+)["amenity"="cafe"];
+
+out center tags;
+`;
+
+        } else if (category === "hotel") {
+
+            radiusQuery = `
+[out:json][timeout:25];
+
+nwr(
+    around:${radius},${lat},${lon}
+)["tourism"="hotel"];
+
+out center tags;
+`;
+
+        } else if (category === "shopping") {
+
+            radiusQuery = `
+[out:json][timeout:25];
+
+nwr(
+    around:${radius},${lat},${lon}
+)["shop"];
+
+out center tags;
+`;
+
+        } else if (category === "things") {
+
+            radiusQuery = `
+[out:json][timeout:25];
+
+(
+    nwr(
+        around:${radius},${lat},${lon}
+    )["tourism"~"attraction|museum|gallery|theme_park|zoo"];
+
+    nwr(
+        around:${radius},${lat},${lon}
+    )["leisure"~"park|sports_centre|stadium"];
+);
+
+out center tags;
+`;
+
+        } else if (category === "service") {
+
+            radiusQuery = `
+[out:json][timeout:25];
+
+(
+    nwr(
+        around:${radius},${lat},${lon}
+    )["shop"];
+
+    nwr(
+        around:${radius},${lat},${lon}
+    )["amenity"];
+);
+
+out center tags;
+`;
+        }
+
+
+        const overpassResponse =
+            await fetch(
+                "https://overpass-api.de/api/interpreter",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/x-www-form-urlencoded",
+                        "User-Agent":
+                            "Locora/2.0"
+                    },
+
+                    body:
+                        new URLSearchParams({
+                            data: radiusQuery
+                        })
+                }
+            );
+
+
+        if (!overpassResponse.ok) {
+
+            throw new Error(
+                `Overpass returned ${overpassResponse.status}`
+            );
+        }
+
+
+        const data =
+            await overpassResponse.json();
+
+
+        const elements =
+            Array.isArray(data.elements)
+                ? data.elements
+                : [];
+
+
+        const results =
+            elements
+                .map(place => {
+
+                    const tags =
+                        place.tags || {};
+
+
+                    /*
+                     * Nodes have lat/lon directly.
+                     * Ways/relations use center.
+                     */
+
+                    const placeLat =
+                        Number(
+                            place.lat ??
+                            place.center?.lat
+                        );
+
+                    const placeLon =
+                        Number(
+                            place.lon ??
+                            place.center?.lon
+                        );
+
+
+                    if (
+                        !Number.isFinite(placeLat) ||
+                        !Number.isFinite(placeLon)
+                    ) {
+                        return null;
+                    }
+
+
+                    const name =
+                        tags.name ||
+                        tags["name:en"] ||
+                        "Unnamed place";
+
+
+                    let type =
+                        category;
+
+
+                    return {
+
+                        id:
+                            `${place.type}-${place.id}`,
+
+                        name,
+
+                        type,
+
+                        category,
+
+                        latitude:
+                            placeLat,
+
+                        longitude:
+                            placeLon,
+
+                        address:
+                            buildAddress(tags),
+
+                        phone:
+                            tags.phone ||
+                            tags["contact:phone"] ||
+                            null,
+
+                        website:
+                            tags.website ||
+                            tags["contact:website"] ||
+                            null,
+
+                        openingHours:
+                            tags.opening_hours ||
+                            null
+                    };
+
+                })
+
+                .filter(Boolean);
+
+
+        /*
+         * Remove duplicates by ID.
+         */
+
+        const uniqueResults =
+            Array.from(
+                new Map(
+                    results.map(place => [
+                        place.id,
+                        place
+                    ])
+                ).values()
+            );
+
+
+        /*
+         * Sort by distance from the
+         * searched location.
+         */
+
+        uniqueResults.sort(
+            (a, b) => {
+
+                const distanceA =
+                    calculateDistance(
+                        lat,
+                        lon,
+                        a.latitude,
+                        a.longitude
+                    );
+
+                const distanceB =
+                    calculateDistance(
+                        lat,
+                        lon,
+                        b.latitude,
+                        b.longitude
+                    );
+
+                return distanceA - distanceB;
+            }
         );
 
+
+        /*
+         * Return the closest 30 places.
+         */
+
+        const limitedResults =
+            uniqueResults
+                .slice(0, 30)
+                .map(place => ({
+                    ...place,
+
+                    distanceKm:
+                        Number(
+                            calculateDistance(
+                                lat,
+                                lon,
+                                place.latitude,
+                                place.longitude
+                            ).toFixed(2)
+                        )
+                }));
+
+
+        return res.json({
+
+            success: true,
+
+            category,
+
+            latitude: lat,
+
+            longitude: lon,
+
+            radiusKm: 5,
+
+            count:
+                limitedResults.length,
+
+            results:
+                limitedResults
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "Nearby places error:",
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            error:
+                "Unable to find nearby places."
+        });
+    }
+});
+
+
+/* =========================================================
+   BUILD ADDRESS
+========================================================= */
+
+function buildAddress(tags) {
+
+    const parts = [];
+
+    if (tags["addr:housenumber"]) {
+        parts.push(
+            tags["addr:housenumber"]
+        );
+    }
+
+    if (tags["addr:street"]) {
+        parts.push(
+            tags["addr:street"]
+        );
+    }
+
+    if (tags["addr:city"]) {
+        parts.push(
+            tags["addr:city"]
+        );
+    }
+
+    if (tags["addr:state"]) {
+        parts.push(
+            tags["addr:state"]
+        );
+    }
+
+    if (tags["addr:postcode"]) {
+        parts.push(
+            tags["addr:postcode"]
+        );
+    }
+
+    return parts.length
+        ? parts.join(", ")
+        : null;
 }
 
 
@@ -408,33 +629,25 @@ function calculateDistance(
     const earthRadius = 6371;
 
     const dLat =
-        (
+        degreesToRadians(
             lat2 - lat1
-        ) *
-        Math.PI /
-        180;
+        );
 
     const dLon =
-        (
+        degreesToRadians(
             lon2 - lon1
-        ) *
-        Math.PI /
-        180;
+        );
 
     const a =
         Math.sin(dLat / 2) *
         Math.sin(dLat / 2) +
 
         Math.cos(
-            lat1 *
-            Math.PI /
-            180
+            degreesToRadians(lat1)
         ) *
 
         Math.cos(
-            lat2 *
-            Math.PI /
-            180
+            degreesToRadians(lat2)
         ) *
 
         Math.sin(dLon / 2) *
@@ -448,426 +661,14 @@ function calculateDistance(
         );
 
     return earthRadius * c;
-
 }
 
 
-/* =========================================================
-   GET PLACE COORDINATES
-========================================================= */
+function degreesToRadians(degrees) {
 
-function getElementCoordinates(
-    element
-) {
-
-    if (
-        element.lat !== undefined &&
-        element.lon !== undefined
-    ) {
-
-        return {
-            latitude:
-                Number(element.lat),
-
-            longitude:
-                Number(element.lon)
-        };
-
-    }
-
-    if (
-        element.center &&
-        element.center.lat !== undefined &&
-        element.center.lon !== undefined
-    ) {
-
-        return {
-            latitude:
-                Number(element.center.lat),
-
-            longitude:
-                Number(element.center.lon)
-        };
-
-    }
-
-    return null;
-
+    return degrees *
+        (Math.PI / 180);
 }
-
-
-/* =========================================================
-   NEARBY ENDPOINT
-========================================================= */
-
-app.get(
-    "/nearby",
-    async (req, res) => {
-
-        try {
-
-            const latitude =
-                Number(req.query.lat);
-
-            const longitude =
-                Number(req.query.lon);
-
-            const category =
-                typeof req.query.category === "string"
-                    ? req.query.category.toLowerCase().trim()
-                    : "";
-
-            if (
-                !Number.isFinite(latitude) ||
-                !Number.isFinite(longitude)
-            ) {
-
-                return res.status(400).json({
-
-                    success: false,
-
-                    error:
-                        "Valid latitude and longitude are required."
-
-                });
-
-            }
-
-            if (
-                latitude < -90 ||
-                latitude > 90 ||
-                longitude < -180 ||
-                longitude > 180
-            ) {
-
-                return res.status(400).json({
-
-                    success: false,
-
-                    error:
-                        "Invalid coordinates."
-
-                });
-
-            }
-
-            if (!CATEGORY_MAP[category]) {
-
-                return res.status(400).json({
-
-                    success: false,
-
-                    error:
-                        "Invalid category."
-
-                });
-
-            }
-
-
-            console.log("");
-            console.log(
-                "================================"
-            );
-            console.log(
-                "        LOCORA NEARBY SEARCH"
-            );
-            console.log(
-                "================================"
-            );
-            console.log(
-                "Category:",
-                category
-            );
-            console.log(
-                "Latitude:",
-                latitude
-            );
-            console.log(
-                "Longitude:",
-                longitude
-            );
-
-
-            const elements =
-                await searchNearbyPlaces(
-                    latitude,
-                    longitude,
-                    category
-                );
-
-
-            const places =
-                elements
-
-                    .map(element => {
-
-                        const coordinates =
-                            getElementCoordinates(
-                                element
-                            );
-
-                        if (!coordinates) {
-                            return null;
-                        }
-
-                        const tags =
-                            element.tags || {};
-
-                        const name =
-                            tags.name ||
-                            tags["name:en"] ||
-                            CATEGORY_MAP[
-                                category
-                            ].name;
-
-                        const distance =
-                            calculateDistance(
-                                latitude,
-                                longitude,
-                                coordinates.latitude,
-                                coordinates.longitude
-                            );
-
-                        const addressParts = [];
-
-                        if (tags["addr:housenumber"]) {
-                            addressParts.push(
-                                tags["addr:housenumber"]
-                            );
-                        }
-
-                        if (tags["addr:street"]) {
-                            addressParts.push(
-                                tags["addr:street"]
-                            );
-                        }
-
-                        if (tags["addr:city"]) {
-                            addressParts.push(
-                                tags["addr:city"]
-                            );
-                        }
-
-                        if (tags["addr:state"]) {
-                            addressParts.push(
-                                tags["addr:state"]
-                            );
-                        }
-
-                        if (tags["addr:postcode"]) {
-                            addressParts.push(
-                                tags["addr:postcode"]
-                            );
-                        }
-
-                        return {
-
-                            name,
-
-                            type:
-                                tags.amenity ||
-                                tags.tourism ||
-                                tags.shop ||
-                                tags.leisure ||
-                                category,
-
-                            category,
-
-                            latitude:
-                                coordinates.latitude,
-
-                            longitude:
-                                coordinates.longitude,
-
-                            distanceKm:
-                                Number(
-                                    distance.toFixed(2)
-                                ),
-
-                            distanceMiles:
-                                Number(
-                                    (
-                                        distance *
-                                        0.621371
-                                    ).toFixed(2)
-                                ),
-
-                            address:
-                                addressParts.join(
-                                    ", "
-                                ),
-
-                            phone:
-                                tags.phone ||
-                                tags["contact:phone"] ||
-                                null,
-
-                            website:
-                                tags.website ||
-                                tags["contact:website"] ||
-                                null,
-
-                            openingHours:
-                                tags.opening_hours ||
-                                null,
-
-                            cuisine:
-                                tags.cuisine ||
-                                null,
-
-                            rating:
-                                null
-
-                        };
-
-                    })
-
-                    .filter(Boolean)
-
-                    .sort(
-                        (
-                            a,
-                            b
-                        ) =>
-                            a.distanceKm -
-                            b.distanceKm
-                    );
-
-
-            /*
-             * Remove duplicate places.
-             */
-
-            const uniquePlaces = [];
-
-            const seen = new Set();
-
-            for (
-                const place of places
-            ) {
-
-                const key =
-                    `${place.name.toLowerCase()}-${place.latitude.toFixed(5)}-${place.longitude.toFixed(5)}`;
-
-                if (
-                    seen.has(key)
-                ) {
-                    continue;
-                }
-
-                seen.add(key);
-
-                uniquePlaces.push(
-                    place
-                );
-
-            }
-
-
-            /*
-             * Return the closest 50 places.
-             */
-
-            const finalResults =
-                uniquePlaces.slice(
-                    0,
-                    50
-                );
-
-
-            console.log(
-                "Results:",
-                finalResults.length
-            );
-
-            console.log(
-                "================================"
-            );
-
-
-            return res.json({
-
-                success: true,
-
-                category,
-
-                categoryName:
-                    CATEGORY_MAP[
-                        category
-                    ].name,
-
-                location: {
-
-                    latitude,
-
-                    longitude
-
-                },
-
-                count:
-                    finalResults.length,
-
-                results:
-                    finalResults
-
-            });
-
-
-        } catch (error) {
-
-            console.error(
-                "Nearby search error:",
-                error
-            );
-
-            return res.status(500).json({
-
-                success: false,
-
-                error:
-                    "Unable to find nearby places."
-
-            });
-
-        }
-
-    }
-);
-
-
-/* =========================================================
-   CATEGORIES ENDPOINT
-========================================================= */
-
-app.get(
-    "/categories",
-    (req, res) => {
-
-        const categories =
-            Object.entries(
-                CATEGORY_MAP
-            ).map(
-                ([id, category]) => ({
-
-                    id,
-
-                    name:
-                        category.name
-
-                })
-            );
-
-        res.json({
-
-            success: true,
-
-            categories
-
-        });
-
-    }
-);
 
 
 /* =========================================================
@@ -883,9 +684,7 @@ app.use(
 
             error:
                 "Endpoint not found."
-
         });
-
     }
 );
 
@@ -895,12 +694,7 @@ app.use(
 ========================================================= */
 
 app.use(
-    (
-        error,
-        req,
-        res,
-        next
-    ) => {
+    (error, req, res, next) => {
 
         console.error(
             "Server error:",
@@ -913,9 +707,7 @@ app.use(
 
             error:
                 "Internal server error."
-
         });
-
     }
 );
 
@@ -928,29 +720,13 @@ app.listen(
     PORT,
     () => {
 
-        console.log("");
         console.log(
-            "================================"
+            `🌎 Locora API running on port ${PORT}`
         );
-        console.log(
-            "       🌎 LOCORA API"
-        );
-        console.log(
-            "================================"
-        );
-        console.log(
-            `Port: ${PORT}`
-        );
+
         console.log(
             `Frontend: ${FRONTEND_URL}`
-        );
-        console.log(
-            "Status: ONLINE"
-        );
-        console.log(
-            "================================"
         );
 
     }
 );
-```
